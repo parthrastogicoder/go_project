@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>P2P Encrypted Chat</title>
+  <style>
+    /* Basic reset and font */
+    * {
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box;
+    }
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: #f0f0f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      color: #333;
+    }
+
+    header {
+      background-color: #075e54;
+      color: white;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      font-size: 1.2rem;
+    }
+
+    #roleContainer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #chatWindow {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      background: #e5ddd5;
+    }
+
+    .system {
+      text-align: center;
+      color: #666;
+      font-size: 0.85rem;
+      margin: 5px 0;
+    }
+
+    .bubbleWrapper {
+      display: flex;
+      margin: 5px 0;
+      width: 100%;
+    }
+
+    .bubbleWrapper.offerer {
+      justify-content: flex-end; /* Bubbles on the right */
+    }
+    .bubbleWrapper.answerer {
+      justify-content: flex-start; /* Bubbles on the left */
+    }
+
+    .bubble {
+      max-width: 60%;
+      padding: 10px 15px;
+      border-radius: 8px;
+      position: relative;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+
+    /* Offerer bubble style (green) */
+    .offerer .bubble {
+      background-color: #DCF8C6;
+      margin-right: 10px;
+    }
+    /* Answerer bubble style (white) */
+    .answerer .bubble {
+      background-color: #fff;
+      margin-left: 10px;
+    }
+
+    footer {
+      display: flex;
+      padding: 10px;
+      background: #f0f0f0;
+    }
+
+    #messageInput {
+      flex: 1;
+      padding: 10px;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      outline: none;
+    }
+
+    #sendBtn {
+      background-color: #075e54;
+      color: white;
+      border: none;
+      outline: none;
+      padding: 0 20px;
+      margin-left: 10px;
+      cursor: pointer;
+      font-size: 1rem;
+      border-radius: 4px;
+    }
+    #sendBtn:hover {
+      background-color: #0a7869;
+    }
+
+    /* Scrollbar styling (optional) */
+    #chatWindow::-webkit-scrollbar {
+      width: 8px;
+    }
+    #chatWindow::-webkit-scrollbar-track {
+      background: #ccc;
+    }
+    #chatWindow::-webkit-scrollbar-thumb {
+      background: #888;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>P2P Encrypted Chat</h1>
+    <div id="roleContainer">
+      <label for="roleSelect" style="font-weight: bold;">Role:</label>
+      <select id="roleSelect">
+        <option value="offer">Offerer</option>
+        <option value="answer">Answerer</option>
+      </select>
+      <button id="startBtn">Start</button>
+    </div>
+  </header>
+
+  <div id="chatWindow"></div>
+
+  <footer>
+    <input type="text" id="messageInput" placeholder="Type a message" />
+    <button id="sendBtn">Send</button>
+  </footer>
+
+  <script>
+    // --- Shared AES Key (16, 24, or 32 chars) ---
+    const secretKeyString = "abcdefghijklmnop"; // 16 chars
+    let cryptoKey;
+
+    // --- WebRTC / Signaling Variables ---
+    let role = "offer";           // "offer" or "answer"
+    let pc = null;                // RTCPeerConnection
+    let dataChannel = null;       // RTCDataChannel
+    let ws = null;                // WebSocket
+    const chatWindow = document.getElementById("chatWindow");
+
+    // On page load
+    window.addEventListener("load", () => {
+      document.getElementById("startBtn").addEventListener("click", startChat);
+      document.getElementById("sendBtn").addEventListener("click", sendMessage);
+      document.getElementById("roleSelect").addEventListener("change", (e) => {
+        role = e.target.value;
+      });
+      // Default role
+      role = document.getElementById("roleSelect").value;
+      importKey(); // Pre-import the encryption key
+    });
+
+    // --- Encryption / Decryption ---
+    async function importKey() {
+      cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(secretKeyString),
+        { name: "AES-GCM" },
+        false,
+        ["encrypt", "decrypt"]
+      );
+    }
+
+    async function encryptMessage(plaintext) {
+      const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV
+      const encoded = new TextEncoder().encode(plaintext);
+      const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, encoded);
+      const combined = new Uint8Array(iv.byteLength + ciphertext.byteLength);
+      combined.set(iv);
+      combined.set(new Uint8Array(ciphertext), iv.byteLength);
+      return btoa(String.fromCharCode(...combined));
+    }
+
+    async function decryptMessage(data) {
+      const combined = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+      const iv = combined.slice(0, 12);
+      const ciphertext = combined.slice(12);
+      try {
+        const plaintextBuffer = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          cryptoKey,
+          ciphertext
+        );
+        return new TextDecoder().decode(plaintextBuffer);
+      } catch (err) {
+        console.error("Decryption error:", err);
+        return "[Decryption Failed]";
+      }
+    }
+
+    // --- UI Helpers ---
+    function addSystemMessage(msg) {
+      const div = document.createElement("div");
+      div.className = "system";
+      div.textContent = msg;
+      chatWindow.appendChild(div);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    function addBubbleMessage(msg, from) {
+      // from = "offerer" or "answerer"
+      const wrapper = document.createElement("div");
+      wrapper.className = `bubbleWrapper ${from}`;
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = msg;
+
+      wrapper.appendChild(bubble);
+      chatWindow.appendChild(wrapper);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    // --- Start Chat (Connect to Signaling) ---
+    async function startChat() {
+      addSystemMessage("Connecting to signaling server...");
+      ws = new WebSocket("ws://localhost:8080/ws");
+
+      ws.onopen = () => {
+        addSystemMessage("Signaling server connected.");
+        setupPeerConnection();
+      };
+      ws.onerror = err => {
+        console.error("WebSocket error:", err);
+        addSystemMessage("Error connecting to signaling server.");
+      };
+      ws.onmessage = async (evt) => {
+        const data = JSON.parse(evt.data);
+        if (data.type === "offer" && role === "answer") {
+          addSystemMessage("Received offer. Creating answer...");
+          await pc.setRemoteDescription(data);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          // Wait for ICE
+          await new Promise(r => setTimeout(r, 1000));
+          ws.send(JSON.stringify(pc.localDescription));
+          addSystemMessage("Answer sent.");
+        } else if (data.type === "answer" && role === "offer") {
+          addSystemMessage("Received answer. Setting remote description...");
+          await pc.setRemoteDescription(data);
+        }
+      };
+    }
+
+    // --- Setup RTCPeerConnection ---
+    function setupPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.oniceconnectionstatechange = () => {
+        addSystemMessage(`ICE state: ${pc.iceConnectionState}`);
+      };
+
+      if (role === "offer") {
+        dataChannel = pc.createDataChannel("chat");
+        setupDataChannel(dataChannel);
+
+        // Create offer
+        pc.createOffer().then(offer => {
+          pc.setLocalDescription(offer);
+        });
+
+        // After a short delay, send the offer (non-trickle approach)
+        setTimeout(() => {
+          ws.send(JSON.stringify(pc.localDescription));
+          addSystemMessage("Offer sent.");
+        }, 1000);
+
+      } else {
+        // Answerer
+        pc.ondatachannel = (event) => {
+          addSystemMessage("Data channel received.");
+          dataChannel = event.channel;
+          setupDataChannel(dataChannel);
+        };
+      }
+    }
+
+    function setupDataChannel(dc) {
+      dc.onopen = () => {
+        addSystemMessage("Data channel is open. Start chatting!");
+      };
+      dc.onmessage = async (event) => {
+        // Decrypt message
+        const decrypted = await decryptMessage(event.data);
+        addBubbleMessage(decrypted, role === "offer" ? "answerer" : "offerer");
+      };
+      dc.onerror = err => {
+        console.error("DataChannel error:", err);
+      };
+    }
+
+    // --- Send Message ---
+    async function sendMessage() {
+      if (!dataChannel || dataChannel.readyState !== "open") {
+        addSystemMessage("Data channel not open yet.");
+        return;
+      }
+      const input = document.getElementById("messageInput");
+      const text = input.value.trim();
+      if (!text) return;
+
+      // Encrypt and send
+      const encrypted = await encryptMessage(text);
+      dataChannel.send(encrypted);
+
+      // Show in local chat
+      addBubbleMessage(text, role); // local bubble
+      input.value = "";
+    }
+  </script>
+</body>
+</html>
